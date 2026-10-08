@@ -33,7 +33,7 @@ For a new installation with Docker, start PostgreSQL:
 
 ```bash
 docker compose up -d postgres
-./scripts/start.sh --production
+./Start-TumorXpert.command
 ```
 
 If you already have PostgreSQL, edit the `POSTGRES_*` values in `.env` to match
@@ -53,23 +53,39 @@ The existing project database is `tumorxpert` in `.local-postgres/data`, on port
 `55432`. The backend reads its credentials from `backend/.env`. The separate
 system PostgreSQL service on port `5432` contains another project's database.
 
-Start both servers, including the existing project database if stopped:
+Double-click `Start-TumorXpert.command` in Finder to start the complete project,
+or run this single file from the project directory:
 
 ```bash
-./scripts/start.sh --production
+./Start-TumorXpert.command
 ```
 
-Open http://localhost:3000. API documentation is at http://127.0.0.1:8000/docs.
-Both servers stay running after the terminal command finishes. Logs and process
-IDs are in `.run/`. To stop the app servers:
+The launcher starts the configured project database if stopped, then starts the
+backend and production frontend. It reuses healthy servers already running,
+builds the frontend if its production build is missing and the frontend is
+stopped, and opens http://localhost:3000 when startup succeeds. Install the
+dependencies using the fresh-clone instructions above before the first launch.
+On a fresh installation using Docker, start PostgreSQL with
+`docker compose up -d postgres` first; the launcher does not start Docker.
+
+For a terminal or headless session without opening a browser:
+
+```bash
+./Start-TumorXpert.command --no-browser
+```
+
+API documentation is at http://127.0.0.1:8000/docs. Both servers stay running
+after the launcher finishes. Logs and process IDs are in `.run/`. To stop the
+app servers:
 
 ```bash
 ./scripts/stop.sh
 ```
 
 PostgreSQL stays running when the app servers stop. For development, use
-`./scripts/start.sh` without `--production`. After frontend changes, run
-`cd frontend && npm run build` before starting production mode again.
+`./scripts/start.sh` without `--production`. After frontend changes, stop the
+app servers, run `cd frontend && npm run build`, return to the project directory,
+and launch `Start-TumorXpert.command` again.
 
 The working Python environment is `backend/.venv`; the copied `.venv-mac`
 environment is retained but is not used. Intel macOS uses PyTorch 2.2.2 and CPU

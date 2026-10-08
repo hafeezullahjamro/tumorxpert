@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--check-database" ) ]]; then
+  echo "Usage: $0 [--check-database]" >&2
+  exit 1
+fi
+
 VENV_PYTHON=""
 for candidate in "$BACKEND_DIR/.venv/bin/python" "$BACKEND_DIR/.venv-mac/bin/python"; do
   if [[ -x "$candidate" ]]; then
@@ -91,6 +96,11 @@ if ! database_ready >/dev/null 2>&1; then
     echo "Start your Postgres server/service and verify your .env credentials, then rerun."
     exit 1
   fi
+fi
+
+if [[ "${1:-}" == "--check-database" ]]; then
+  echo "PostgreSQL ready at $POSTGRES_HOST:$POSTGRES_PORT."
+  exit 0
 fi
 
 if ! "$VENV_PYTHON" -c 'import alembic, uvicorn' >/dev/null 2>&1; then

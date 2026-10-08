@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+import webbrowser
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,9 +44,24 @@ def start() -> None:
     npm = shutil.which("npm")
     if not npm or not (ROOT / "frontend/node_modules/next").exists():
         raise RuntimeError("Install frontend dependencies with: cd frontend && npm ci")
+    environment = os.environ.copy()
+    environment.setdefault("API_BACKEND_URL", backend_url)
+    environment.setdefault("NEXT_TELEMETRY_DISABLED", "1")
+    environment.setdefault("OMP_NUM_THREADS", "2")
+    environment.setdefault("MKL_NUM_THREADS", "2")
+    environment.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "2")
+    # Check the database even when the API server is already running.
+    subprocess.run(
+        ["bash", str(ROOT / "scripts/start-backend.sh"), "--check-database"],
+        cwd=ROOT, env=environment, check=True,
+    )
     if production and not (ROOT / "frontend/.next/BUILD_ID").is_file():
-        raise RuntimeError("Build the frontend first: cd frontend && npm run build")
-    RUN.mkdir(exist_ok=True)
+        if "--build-if-needed" not in sys.argv:
+            raise RuntimeError("Build the frontend first: cd frontend && npm run build")
+        if listening(frontend_port):
+            raise RuntimeError("The frontend is running without a production build. Stop it with ./scripts/stop.sh before building.")
+        print("Building the frontend for its first production launch...", flush=True)
+        subprocess.run([npm, "run", "build"], cwd=ROOT / "frontend", env=environment, check=True)
     services = (
         ("backend", settings["port"], ["bash", str(ROOT / "scripts/start-backend.sh")], ROOT, backend_url + "/health"),
         ("frontend", frontend_port, [npm, "run", "start" if production else "dev", "--", "--hostname", "127.0.0.1", "--port", str(frontend_port)], ROOT / "frontend", f"http://127.0.0.1:{frontend_port}/auth/login"),
@@ -61,12 +78,6 @@ def start() -> None:
                 raise RuntimeError(f"Port {port} is occupied and {name} is not healthy: {error}") from error
             print(f"{name.capitalize()} already running on port {port}.")
             continue
-        environment = os.environ.copy()
-        environment.setdefault("API_BACKEND_URL", backend_url)
-        environment.setdefault("NEXT_TELEMETRY_DISABLED", "1")
-        environment.setdefault("OMP_NUM_THREADS", "2")
-        environment.setdefault("MKL_NUM_THREADS", "2")
-        environment.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", "2")
         with (RUN / f"{name}.log").open("a") as log:
             process = subprocess.Popen(command, cwd=directory, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         (RUN / f"{name}.pid").write_text(str(process.pid))
@@ -86,6 +97,8 @@ def start() -> None:
     print(f"Open http://localhost:{frontend_port}")
     print(f"Backend docs: {backend_url}/docs")
     print(f"Logs: {RUN}")
+    if "--open-browser" in sys.argv:
+        webbrowser.open(f"http://localhost:{frontend_port}")
 
 
 def stop() -> None:
@@ -122,7 +135,16 @@ def stop() -> None:
 
 if __name__ == "__main__":
     try:
-        stop() if len(sys.argv) > 1 and sys.argv[1] == "stop" else start()
+        if len(sys.argv) > 1 and sys.argv[1] == "stop":
+            stop()
+        else:
+            RUN.mkdir(exist_ok=True)
+            with (RUN / "launcher.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise RuntimeError("TumorXpert startup is already in progress. Wait for the other launcher to finish.") from None
+                start()
     except Exception as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)
