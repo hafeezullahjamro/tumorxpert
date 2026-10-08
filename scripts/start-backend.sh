@@ -29,9 +29,26 @@ print(s.backend_host, s.backend_port, url.host or "localhost", url.port or 5432,
 PY
 )
 
+database_ready() {
+  "$VENV_PYTHON" - <<'PY'
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+from app.core.config import get_settings
+
+url = make_url(get_settings().database_url)
+connect_args = {"connect_timeout": 5} if url.get_backend_name() == "postgresql" else {}
+engine = create_engine(url, connect_args=connect_args)
+try:
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+finally:
+    engine.dispose()
+PY
+}
+
 find_pg_bin() {
-  if command -v pg_isready >/dev/null 2>&1; then
-    dirname "$(command -v pg_isready)"
+  if command -v pg_ctl >/dev/null 2>&1; then
+    dirname "$(command -v pg_ctl)"
     return 0
   fi
 
@@ -45,7 +62,7 @@ find_pg_bin() {
   )
 
   for bin_dir in "${candidates[@]}"; do
-    if [[ -x "$bin_dir/pg_isready" ]]; then
+    if [[ -x "$bin_dir/pg_ctl" ]]; then
       echo "$bin_dir"
       return 0
     fi
@@ -54,27 +71,26 @@ find_pg_bin() {
   return 1
 }
 
-if ! PG_BIN="$(find_pg_bin)"; then
-  echo "PostgreSQL client tools not found (pg_isready missing)."
-  echo "Install PostgreSQL tools or add them to PATH, then rerun."
-  exit 1
-fi
-
-PG_ISREADY="$PG_BIN/pg_isready"
-PG_CTL="$PG_BIN/pg_ctl"
-
-if ! "$PG_ISREADY" -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" >/dev/null 2>&1; then
+if ! database_ready >/dev/null 2>&1; then
   LOCAL_DATA_DIR="$ROOT_DIR/.local-postgres/data"
-  if [[ ( "$POSTGRES_HOST" == "localhost" || "$POSTGRES_HOST" == "127.0.0.1" ) && "$POSTGRES_PORT" == "55432" && -d "$LOCAL_DATA_DIR" && -x "$PG_CTL" ]]; then
-    echo "Postgres is down. Starting project-local Postgres on port 55432..."
-    "$PG_CTL" -D "$LOCAL_DATA_DIR" -l "$ROOT_DIR/.local-postgres/postgres.log" -o "-p 55432" start >/dev/null
+  if [[ ( "$POSTGRES_HOST" == "localhost" || "$POSTGRES_HOST" == "127.0.0.1" ) && "$POSTGRES_PORT" == "55432" && -d "$LOCAL_DATA_DIR" ]]; then
+    if ! PG_BIN="$(find_pg_bin)"; then
+      echo "Project-local PostgreSQL is unreachable and pg_ctl was not found."
+      echo "Install PostgreSQL server tools or add them to PATH, then rerun."
+      exit 1
+    fi
+    PG_CTL="$PG_BIN/pg_ctl"
+    if ! "$PG_CTL" -D "$LOCAL_DATA_DIR" status >/dev/null 2>&1; then
+      echo "Postgres is down. Starting project-local Postgres on port 55432..."
+      "$PG_CTL" -D "$LOCAL_DATA_DIR" -l "$ROOT_DIR/.local-postgres/postgres.log" -o "-p 55432" start >/dev/null
+    fi
   fi
-fi
 
-if ! "$PG_ISREADY" -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" >/dev/null 2>&1; then
-  echo "Postgres is not accepting connections at $POSTGRES_HOST:$POSTGRES_PORT"
-  echo "Start your Postgres server/service first, then rerun this command."
-  exit 1
+  if ! database_ready >/dev/null 2>&1; then
+    echo "Cannot connect to the database at $POSTGRES_HOST:$POSTGRES_PORT"
+    echo "Start your Postgres server/service and verify your .env credentials, then rerun."
+    exit 1
+  fi
 fi
 
 if ! "$VENV_PYTHON" -c 'import alembic, uvicorn' >/dev/null 2>&1; then
