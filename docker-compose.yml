@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tumorxpert}
+      POSTGRES_USER: ${POSTGRES_USER:-tx_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tx_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tx_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:8.12
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@tumorxpert.local
+      PGADMIN_DEFAULT_PASSWORD: tumorxpert
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  # backend:
+  #   build:
+  #     context: ./backend
+  #   command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+  #   environment:
+  #     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-tx_user}:${POSTGRES_PASSWORD:-tx_password}@postgres:5432/${POSTGRES_DB:-tumorxpert}
+  #     STORAGE_ROOT: /app/storage
+  #   volumes:
+  #     - ./backend:/app
+  #     - ./storage:/app/storage
+  #   ports:
+  #     - "8000:8000"
+  #   depends_on:
+  #     - postgres
+  #     - redis
+
+volumes:
+  pgdata:

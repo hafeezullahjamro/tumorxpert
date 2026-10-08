@@ -1,0 +1,60 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+.venv-mac/
+.run/
+.local-postgres/
+.env.before-run
+node_modules.windows-backup/
+venv/
+env/
+
+# Node / Next.js
+node_modules/
+.next/
+.turbo/
+dist/
+out/
+
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# Local databases and generated test artifacts
+backend/storage/
+backend/test_storage/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.dump
+*.pid
+*.tsbuildinfo
+
+# Storage and temp artifacts
+storage/uploads/**
+storage/processed/**
+storage/exports/**
+storage/temp/**
+!storage/uploads/.gitkeep
+!storage/processed/.gitkeep
+!storage/exports/.gitkeep
+!storage/temp/.gitkeep
+
+# PDFs and generated reports
+*.pdf
