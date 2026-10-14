@@ -13,7 +13,9 @@ export default function JobsPage() {
   const { data: studies = [], isLoading, isError, error, refetch } = useQuery({
     queryKey: ["studies"],
     queryFn: fetchStudies,
-    refetchInterval: 5000
+    refetchInterval: 1000,
+    refetchIntervalInBackground: true,
+    refetchOnMount: "always"
   });
 
   return (
@@ -47,6 +49,7 @@ export default function JobsPage() {
             <tr>
               <th className="px-4 py-3">Study</th>
               <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Progress</th>
               <th className="px-4 py-3">Created</th>
               <th className="px-4 py-3">Actions</th>
             </tr>
@@ -56,6 +59,13 @@ export default function JobsPage() {
                 <tr key={study.id}>
                   <td className="px-4 py-3 font-medium text-slate-800">{study.name}</td>
                   <td className="px-4 py-3 text-slate-600">{study.status}</td>
+                  <td className="min-w-[180px] px-4 py-3 text-slate-600">
+                    {study.progress ? <>
+                      <span>{study.progress.percent}%</span>
+                      <progress className="mt-1 block h-2 w-full accent-teal-600" aria-label={`${study.name} overall progress`} max={100} value={study.progress.percent} />
+                      <span className="mt-1 block text-xs">{study.progress.stages.find(stage => stage.status === "RUNNING")?.label ?? study.status}</span>
+                    </> : <span className="text-xs">{study.status === "UPLOADED" ? "Not started" : "No recorded measurements"}</span>}
+                  </td>
                   <td className="px-4 py-3 text-slate-500">{formatDate(study.created_at)}</td>
                   <td className="px-4 py-3">
                     <Button asChild variant="secondary">

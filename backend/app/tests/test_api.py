@@ -14,10 +14,11 @@ import pytest
 def _create_nifti_bytes(value: float = 0.0) -> bytes:
     data = np.full((16, 16, 16), fill_value=value, dtype=np.float32)
     img = nib.Nifti1Image(data, affine=np.eye(4))
-    with tempfile.NamedTemporaryFile(suffix=".nii.gz") as tmp:
-        nib.save(img, tmp.name)
-        tmp.seek(0)
-        return tmp.read()
+    with tempfile.TemporaryDirectory() as temporary:
+        from pathlib import Path
+        path = Path(temporary) / "scan.nii.gz"
+        nib.save(img, path)
+        return path.read_bytes()
 
 
 def _create_tar_bytes(members: list[tuple[str, bytes]]) -> bytes:
@@ -251,7 +252,7 @@ def test_comparison_rejects_unaligned_images_before_creating_record(client, monk
 
 
 def test_upload_run_export_flow(client, monkeypatch):
-    def fake_run_study_pipeline(*, study_root, processed_root, settings):
+    def fake_run_study_pipeline(*, study_root, processed_root, settings, progress=None):
         from app.services.imaging import save_nifti
         from app.services.postprocess import compute_metrics
 
@@ -381,7 +382,7 @@ def test_upload_supports_brats_named_tar_archive(client):
 
 
 def test_compare_rejects_same_study(client, monkeypatch):
-    def fake_run_study_pipeline(*, study_root, processed_root, settings):
+    def fake_run_study_pipeline(*, study_root, processed_root, settings, progress=None):
         from app.services.imaging import save_nifti
         from app.services.postprocess import compute_metrics
 

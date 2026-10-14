@@ -31,6 +31,7 @@ class StudyRead(BaseModel):
     id: uuid.UUID
     name: str
     status: str
+    progress: Optional[Dict[str, Any]] = None
     sequences_present: Dict[str, bool]
     qc_flags: Dict[str, Any]
     created_at: datetime

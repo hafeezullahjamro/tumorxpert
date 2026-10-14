@@ -44,10 +44,23 @@ def skull_strip(image: sitk.Image) -> sitk.Image:
     return sitk.Cast(stripped, sitk.sitkFloat32)
 
 
-def n4_bias_correct(image: sitk.Image) -> sitk.Image:
+def n4_bias_correct(image: sitk.Image, *, progress=None, key=None) -> sitk.Image:
     mask = _foreground_mask(image)
     corrector = sitk.N4BiasFieldCorrectionImageFilter()
+    counts = {}
+    maximum = sum(corrector.GetMaximumNumberOfIterations())
+    if progress is not None:
+        def iteration_completed():
+            level = corrector.GetCurrentLevel()
+            counts[level] = corrector.GetElapsedIterations()
+            progress.update(key, sum(counts.values()), maximum, unit="iterations (maximum)",
+                            detail=f"Resolution {level + 1}/{len(corrector.GetMaximumNumberOfIterations())}; iteration {counts[level]}")
+        corrector.AddCommand(sitk.sitkIterationEvent, iteration_completed)
     corrected = corrector.Execute(image, mask)
+    if progress is not None:
+        actual = sum(counts.values())
+        progress.update(key, actual, max(actual, 1), unit="iterations", status="DONE",
+                        detail=f"Bias correction finished after {actual} observed iterations.")
     return sitk.Cast(corrected, sitk.sitkFloat32)
 
 
@@ -72,38 +85,66 @@ def preprocess_nifti(
     output_path: Path,
     *,
     reference_path: Path | None = None,
+    progress=None,
+    modality: str = "volume",
 ) -> Path:
     logger.info("Preprocessing NIfTI %s", input_path)
+    def begin(operation, detail=None):
+        if progress is not None:
+            progress.update(f"{modality}.{operation}", detail=detail, force=True)
+
+    def complete(operation):
+        if progress is not None:
+            progress.done(f"{modality}.{operation}")
+
+    begin("read")
     image = _read_image(input_path)
+    complete("read")
     if reference_path is not None:
+        begin("align")
         reference = _read_image(reference_path)
         image = resample_to_reference(image, reference)
-    image = n4_bias_correct(image)
+        complete("align")
+    elif progress is not None:
+        progress.skip(f"{modality}.align", "This volume defines the reference geometry.")
+    begin("n4", "Creating foreground mask for bias correction.")
+    image = n4_bias_correct(image, progress=progress, key=f"{modality}.n4")
+    begin("strip")
     image = skull_strip(image)
+    complete("strip")
+    begin("save")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(image, str(output_path), useCompression=True)
+    complete("save")
     return output_path
 
 
 def preprocess_study_modalities(
     modality_paths: dict[str, Path],
     output_dir: Path,
+    *, progress=None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     ordered_modalities = list(modality_paths.keys())
     if not ordered_modalities:
         return {}
+    if progress is not None:
+        operations = (("read", "Load volume"), ("align", "Align geometry"),
+                      ("n4", "N4 bias correction"), ("strip", "Foreground masking"), ("save", "Save preprocessed volume"))
+        progress.children("preprocess", [(f"{modality}.{operation}", f"{modality.upper()} · {label}")
+                                          for modality in ordered_modalities for operation, label in operations]
+                          + [("normalize", "Validate aligned volumes and normalize intensities")])
 
     reference_modality = ordered_modalities[0]
     reference_output = output_dir / f"{reference_modality}_preprocessed.nii.gz"
-    preprocess_nifti(modality_paths[reference_modality], reference_output)
+    preprocess_nifti(modality_paths[reference_modality], reference_output, progress=progress, modality=reference_modality)
 
     processed = {reference_modality: reference_output}
     for modality, path in modality_paths.items():
         if modality == reference_modality:
             continue
         output_path = output_dir / f"{modality}_preprocessed.nii.gz"
-        preprocess_nifti(path, output_path, reference_path=reference_output)
+        preprocess_nifti(path, output_path, reference_path=reference_output, progress=progress, modality=modality)
         processed[modality] = output_path
     return processed
 

@@ -1,9 +1,33 @@
 export type StudyStatus = "UPLOADED" | "PROCESSING" | "DONE" | "FAILED";
 
+export interface ProcessingStep {
+  id: string;
+  label: string;
+  status: "PENDING" | "RUNNING" | "DONE" | "SKIPPED" | "FAILED";
+  completed: number;
+  total: number;
+  unit: string;
+  percent: number;
+  detail?: string | null;
+  children: ProcessingStep[];
+}
+
+export interface ProcessingProgress {
+  run_id: string;
+  status: "PROCESSING" | "DONE" | "FAILED";
+  percent: number;
+  started_at: string;
+  updated_at: string;
+  finished_at?: string | null;
+  error?: string | null;
+  stages: ProcessingStep[];
+}
+
 export interface Study {
   id: string;
   name: string;
   status: StudyStatus;
+  progress?: ProcessingProgress | null;
   sequences_present: Record<string, boolean>;
   qc_flags: Record<string, string>;
   created_at: string;

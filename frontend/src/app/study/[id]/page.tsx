@@ -1,8 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { notFound, useParams, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { notFound, useParams, useSearchParams, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, FileArchive, FileText, Microscope, Play, ScanEye } from "lucide-react";
 import { MetricsOverview } from "../../../components/metrics-overview";
@@ -24,21 +24,25 @@ export default function StudyDetailPage() {
   const queryClient = useQueryClient();
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const studyId = params?.id;
   if (!studyId) notFound();
-  const [activeStep, setActiveStep] = useState(0);
-  const [autoStarted, setAutoStarted] = useState(false);
+  const [requestedRun, setRequestedRun] = useState(false);
+  const autoStarted = useRef(false);
 
   const {
     data: study,
     isLoading: studyLoading,
-    isError: studyError,
     error: studyErrorValue,
+    isRefetchError: progressConnectionError,
     refetch: refetchStudy
   } = useQuery({
     queryKey: ["study", studyId],
     queryFn: () => fetchStudy(studyId),
-    refetchInterval: (query) => query.state.data?.status === "PROCESSING" ? 5000 : false
+    refetchInterval: (query) => query.state.data?.status === "PROCESSING" || requestedRun ? 1000 : false,
+    refetchIntervalInBackground: true,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always"
   });
   const { data: metrics } = useQuery({
     queryKey: ["study", studyId, "metrics"],
@@ -68,25 +72,15 @@ export default function StudyDetailPage() {
       }
     }
   });
-  const runSteps = useMemo(() => {
-    const steps = ["Validate uploaded modalities", "Preprocess study volumes"];
-    const missingModalities = Object.values(study?.sequences_present ?? {}).filter((present) => !present).length;
-    if (missingModalities === 1) {
-      steps.push("Synthesize the missing modality");
-    }
-    steps.push("Run nnU-Net segmentation");
-    steps.push("Run Swin UNETR segmentation");
-    steps.push("Fuse model probabilities into ensemble output");
-    steps.push("Generate metrics and exports");
-    steps.push("Render preview images");
-    return steps;
-  }, [study?.sequences_present]);
   const hasPdfReport = files.some((file) => file.kind === "PDF");
 
   const runMutation = useMutation({
     mutationFn: runStudy,
+    onMutate: () => {
+      setRequestedRun(true);
+      void queryClient.invalidateQueries({ queryKey: ["study", studyId] });
+    },
     onSuccess: async () => {
-      setActiveStep(runSteps.length);
       toast.success("Segmentation finished", {
         description: "Per-model outputs, the final ensemble result, and exports are ready."
       });
@@ -98,27 +92,29 @@ export default function StudyDetailPage() {
       ]);
     },
     onError: (error: unknown) => {
-      toast.error("Run failed", {
+      toast.error("Processing request could not finish", {
         description: getApiErrorMessage(error)
       });
+    },
+    onSettled: () => {
+      setRequestedRun(false);
+      void queryClient.invalidateQueries({ queryKey: ["study", studyId] });
     }
   });
 
   useEffect(() => {
-    if (!runMutation.isPending) return;
-    const interval = window.setInterval(() => {
-      setActiveStep((current) => Math.min(current + 1, Math.max(runSteps.length - 1, 0)));
-    }, 1800);
-    return () => window.clearInterval(interval);
-  }, [runMutation.isPending, runSteps.length]);
+    if (isGuest || searchParams.get("run") !== "1" || !study || autoStarted.current) return;
+    autoStarted.current = true;
+    // Consume this action so history navigation cannot start another run.
+    router.replace(`/study/${study.id}`, { scroll: false });
+    if (study.status !== "PROCESSING") runMutation.mutate(study.id);
+  }, [isGuest, router, runMutation, searchParams, study]);
 
   useEffect(() => {
-    const shouldAutoRun = searchParams.get("run") === "1";
-    if (isGuest || !shouldAutoRun || !study || autoStarted || runMutation.isPending || study.status === "PROCESSING") return;
-    setAutoStarted(true);
-    setActiveStep(0);
-    runMutation.mutate(study.id);
-  }, [autoStarted, isGuest, runMutation, searchParams, study]);
+    if (study?.status !== "DONE") return;
+    void queryClient.invalidateQueries({ queryKey: ["study", studyId, "files"] });
+    void queryClient.invalidateQueries({ queryKey: ["study", studyId, "metrics"] });
+  }, [queryClient, studyId, study?.status]);
 
   if (studyLoading) {
     return (
@@ -135,7 +131,7 @@ export default function StudyDetailPage() {
     );
   }
 
-  if (studyError || !study) {
+  if (!study) {
     return (
       <EmptyState
         icon={<AlertTriangle className="tx-icon-lg" />}
@@ -161,7 +157,6 @@ export default function StudyDetailPage() {
                 {!isGuest && (
                   <Button
                     onClick={() => {
-                      setActiveStep(0);
                       runMutation.mutate(study.id);
                     }}
                     disabled={runMutation.isPending || study.status === "PROCESSING"}
@@ -189,11 +184,10 @@ export default function StudyDetailPage() {
           </p>
         </div>
         <StudyProcessingTimeline
-          steps={runSteps}
-          activeStep={runMutation.isPending ? activeStep : study.status === "DONE" ? runSteps.length : activeStep}
-          isRunning={runMutation.isPending}
-          hasError={runMutation.isError}
-          errorMessage={runMutation.isError ? getApiErrorMessage(runMutation.error) : undefined}
+          progress={study.progress}
+          status={study.status}
+          awaitingStart={requestedRun && study.status !== "PROCESSING"}
+          connectionError={progressConnectionError}
         />
         <section className="rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm">
           <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
@@ -209,7 +203,7 @@ export default function StudyDetailPage() {
             <Microscope className="tx-icon text-primary" />
             Segmentation Metrics
           </h2>
-          <MetricsOverview metrics={metrics ?? undefined} />
+          <MetricsOverview metrics={study.status === "DONE" ? metrics ?? undefined : undefined} />
         </section>
         <section className="rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm">
           <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900">

@@ -261,11 +261,14 @@ def _synthesize_missing_modality(
     model: Any,
     device: Any,
     torch: Any,
+    progress_callback=None,
 ) -> np.ndarray:
     source_modalities = SYNTHESIS_SOURCE_MODALITIES[target_modality]
     height, width, depth = next(iter(normalized_modalities.values())).shape
     synthesized = np.zeros((height, width, depth), dtype=np.float32)
     k = 2
+    if depth <= 2 * k:
+        raise ValueError("Missing-modality synthesis requires at least five slices for the model's context window.")
 
     with torch.no_grad():
         for z in range(k, depth - k):
@@ -279,6 +282,8 @@ def _synthesize_missing_modality(
             prediction = model(tensor).detach().cpu().numpy()[0, 0]
             prediction = _crop_2d(prediction, padding)
             synthesized[:, :, z] = prediction.astype(np.float32)
+            if progress_callback is not None:
+                progress_callback(z - k + 1, max(depth - 2 * k, 1))
 
     background_mask = np.zeros_like(synthesized, dtype=bool)
     for modality in source_modalities:
@@ -293,6 +298,7 @@ def _segment_completed_modalities_nnunet(
     model: Any,
     device: Any,
     torch: Any,
+    progress_callback=None,
 ) -> np.ndarray:
     ordered = [normalized_modalities[key] for key in SEGMENTATION_MODALITIES]
     height, width, depth = ordered[0].shape
@@ -307,6 +313,8 @@ def _segment_completed_modalities_nnunet(
             probs = torch.softmax(logits, dim=1).detach().cpu().numpy()[0]
             probs = _crop_2d(probs, padding)
             probabilities[:, :, :, z] = probs.astype(np.float32)
+            if progress_callback is not None:
+                progress_callback(z + 1, depth)
 
     return probabilities
 
@@ -319,10 +327,33 @@ def _segment_completed_modalities_swinunetr(
     overlap: float,
     device: Any,
     torch: Any,
+    progress_callback=None,
 ) -> np.ndarray:
     _, sliding_window_inference = _load_monai_dependencies()
     ordered = [normalized_modalities[key].astype(np.float32) for key in SEGMENTATION_MODALITIES]
     stacked = np.stack(ordered, axis=0)
+    from monai.data.utils import dense_patch_slices
+
+    image_size = tuple(max(size, roi) for size, roi in zip(stacked.shape[1:], roi_size))
+    scan_interval = tuple(roi if size == roi else max(int(roi * (1 - overlap)), 1)
+                          for size, roi in zip(image_size, roi_size))
+    window_count = len(dense_patch_slices(image_size, roi_size, scan_interval))
+    completed_windows = 0
+    if progress_callback is not None:
+        progress_callback(0, window_count)
+
+    def predict_window(patch):
+        nonlocal completed_windows
+        output = model(patch)
+        # GPU forwards can be asynchronous; count only finished computation.
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "mps":
+            torch.mps.synchronize()
+        completed_windows += patch.shape[0]
+        if progress_callback is not None:
+            progress_callback(completed_windows, window_count)
+        return output
 
     with torch.no_grad():
         tensor = torch.from_numpy(stacked[None, ...]).to(device=device, dtype=torch.float32)
@@ -330,7 +361,7 @@ def _segment_completed_modalities_swinunetr(
             inputs=tensor,
             roi_size=roi_size,
             sw_batch_size=1,
-            predictor=model,
+            predictor=predict_window,
             overlap=overlap,
         )
         probabilities = torch.softmax(logits, dim=1)[0].detach().cpu().numpy().astype(np.float32)
@@ -405,8 +436,10 @@ def _save_prediction_output(
     )
 
 
-def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Settings) -> PipelineResult:
+def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Settings, progress=None) -> PipelineResult:
     start_time = perf_counter()
+    if progress is not None:
+        progress.update("validate", detail="Loading inference libraries and checking uploaded files.", force=True)
     torch, PlainConvUNet2D, UNet2D = _load_torch_dependencies()
     device = _resolve_device(settings, torch)
 
@@ -418,15 +451,27 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
         raise ValueError(
             "Only one missing modality is supported. Upload three or four BraTS-style modality files."
         )
+    if progress is not None:
+        progress.done("validate", f"Found {len(modality_paths)} MRI modalities.")
 
-    preprocessed_paths = preprocess_study_modalities(modality_paths, processed_root / "preprocessed")
+    preprocess_options = {"progress": progress} if progress is not None else {}
+    preprocessed_paths = preprocess_study_modalities(modality_paths, processed_root / "preprocessed", **preprocess_options)
+    if progress is not None:
+        progress.update("normalize", force=True)
     volumes = {modality: _load_nifti(path) for modality, path in preprocessed_paths.items()}
     _validate_modalities(volumes)
     normalized = {modality: _normalize_nonzero(volume.data) for modality, volume in volumes.items()}
+    if progress is not None:
+        progress.done("normalize")
 
     synthesized_paths: dict[str, Path] = {}
     missing_modality = missing_modalities[0] if missing_modalities else None
     if missing_modality:
+        if progress is not None:
+            progress.children("synthesis", [("synthesis.load", "Load synthesis checkpoint"),
+                                            ("synthesis.slices", f"Predict {missing_modality.upper()} slices"),
+                                            ("synthesis.save", "Save synthesized volume")])
+            progress.update("synthesis.load", force=True)
         synthesis_model = _load_synthesis_model(
             target_modality=missing_modality,
             settings=settings,
@@ -434,6 +479,9 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
             torch=torch,
             UNet2D=UNet2D,
         )
+        if progress is not None:
+            progress.done("synthesis.load")
+            progress.update("synthesis.slices", 0, max(next(iter(normalized.values())).shape[2] - 4, 1), unit="slices", force=True)
         synthesized_volume = _synthesize_missing_modality(
             target_modality=missing_modality,
             normalized_modalities=normalized,
@@ -441,7 +489,11 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
             model=synthesis_model,
             device=device,
             torch=torch,
+            progress_callback=(lambda completed, total: progress.update("synthesis.slices", completed, total, unit="slices")) if progress else None,
         )
+        if progress is not None:
+            progress.done("synthesis.slices")
+            progress.update("synthesis.save", force=True)
         template = next(iter(volumes.values()))
         synthesized_header = template.header.copy()
         synthesized_header.set_data_dtype(np.float32)
@@ -461,6 +513,10 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
         )
         normalized[missing_modality] = synthesized_volume
         synthesized_paths[missing_modality] = synthesized_path
+        if progress is not None:
+            progress.done("synthesis.save")
+    elif progress is not None:
+        progress.skip("synthesis", "All four modalities were uploaded; synthesis is unnecessary.")
 
     reference_modality = _select_reference_modality(normalized)
     reference_metadata = volumes[reference_modality]
@@ -476,22 +532,41 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
     if backend_mode in {"auto", "ensemble", "nnunet2d"}:
         nnunet_required = backend_mode in {"ensemble", "nnunet2d"}
         try:
+            if progress is not None:
+                progress.children("nnunet", [("nnunet.load", "Load nnU-Net checkpoint"), ("nnunet.slices", "Predict volume slices")])
+                progress.update("nnunet.load", force=True)
             nnunet_model = _load_nnunet_model(settings, device, torch, PlainConvUNet2D)
+            if progress is not None:
+                progress.done("nnunet.load")
+                progress.update("nnunet.slices", 0, reference_volume.shape[2], unit="slices", force=True)
             model_probability_maps["nnunet"] = _segment_completed_modalities_nnunet(
                 normalized_modalities=normalized,
                 model=nnunet_model,
                 device=device,
                 torch=torch,
+                progress_callback=(lambda completed, total: progress.update("nnunet.slices", completed, total, unit="slices")) if progress else None,
             )
-        except Exception:
+            if progress is not None:
+                progress.done("nnunet.slices")
+        except Exception as exc:
             if nnunet_required:
                 raise
             logger.exception("nnU-Net inference unavailable during auto mode; continuing without it.")
+            if progress is not None:
+                progress.skip("nnunet", f"Model failed in auto mode: {exc}")
+    elif progress is not None:
+        progress.skip("nnunet", f"Disabled by segmentation mode {backend_mode}.")
 
     if backend_mode in {"auto", "ensemble", "swinunetr3d"}:
         swin_required = backend_mode in {"ensemble", "swinunetr3d"}
         try:
+            if progress is not None:
+                progress.children("swinunetr", [("swinunetr.load", "Load Swin UNETR checkpoint"), ("swinunetr.windows", "Predict 3D windows")])
+                progress.update("swinunetr.load", force=True)
             swin_model, roi_size = _load_swinunetr_model(settings, device, torch)
+            if progress is not None:
+                progress.done("swinunetr.load")
+                progress.update("swinunetr.windows", unit="windows", detail="Preparing sliding-window inference.", force=True)
             model_probability_maps["swinunetr"] = _segment_completed_modalities_swinunetr(
                 normalized_modalities=normalized,
                 model=swin_model,
@@ -499,18 +574,30 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
                 overlap=settings.swinunetr_overlap,
                 device=device,
                 torch=torch,
+                progress_callback=(lambda completed, total: progress.update("swinunetr.windows", completed, total, unit="windows")) if progress else None,
             )
-        except Exception:
+            if progress is not None:
+                progress.done("swinunetr.windows")
+        except Exception as exc:
             if swin_required:
                 raise
             logger.exception("Swin UNETR inference unavailable during auto mode; continuing without it.")
+            if progress is not None:
+                progress.skip("swinunetr", f"Model failed in auto mode: {exc}")
+    elif progress is not None:
+        progress.skip("swinunetr", f"Disabled by segmentation mode {backend_mode}.")
 
     if not model_probability_maps:
         raise RuntimeError("No segmentation backend is available for inference.")
 
     model_outputs: dict[str, SegmentationOutput] = {}
     model_metrics: dict[str, dict[str, float]] = {}
+    if progress is not None:
+        progress.children("ensemble", [(f"output.{name}", f"Save {name} predictions and metrics") for name in model_probability_maps]
+                          + [("ensemble.fuse", "Fuse probabilities and save ensemble"), ("ensemble.metrics", "Calculate tumor metrics and model agreement")])
     for name, probabilities in model_probability_maps.items():
+        if progress is not None:
+            progress.update(f"output.{name}", force=True)
         labels = _labels_from_probabilities(probabilities)
         confidence = _confidence_from_probabilities(probabilities)
         output = _save_prediction_output(
@@ -528,7 +615,11 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
             spacing=reference_metadata.spacing,
             runtime_sec=0.0,
         )
+        if progress is not None:
+            progress.done(f"output.{name}")
 
+    if progress is not None:
+        progress.update("ensemble.fuse", force=True)
     ensemble_probabilities = _ensemble_probabilities(model_probability_maps)
     ensemble_labels = _labels_from_probabilities(ensemble_probabilities)
     ensemble_confidence = _calibrate_confidence(ensemble_probabilities, model_probability_maps)
@@ -542,6 +633,9 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
         final_primary=True,
     )
     model_outputs["ensemble"] = ensemble_output
+    if progress is not None:
+        progress.done("ensemble.fuse")
+        progress.update("ensemble.metrics", force=True)
 
     runtime_sec = perf_counter() - start_time
     agreement_metrics: dict[str, float] = {}
@@ -559,6 +653,8 @@ def run_study_pipeline(*, study_root: Path, processed_root: Path, settings: Sett
         agreement_metrics=agreement_metrics,
     )
     model_metrics["ensemble"] = metrics
+    if progress is not None:
+        progress.done("ensemble.metrics")
 
     logger.info(
         "Completed study pipeline using %s device; models=%s; missing modality=%s",

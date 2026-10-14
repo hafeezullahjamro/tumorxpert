@@ -4,6 +4,31 @@ TumorXpert is a local-first research sandbox for brain-tumor MRI workflows. The 
 
 > WARNING: Research demo only. Do not use outputs for clinical decision making.
 
+## Windows: clone, install, and run
+
+See the [complete Windows guide](docs/WINDOWS.md) for cloning, automatic
+PostgreSQL creation and migration, and separate backend/frontend commands.
+After cloning, one PowerShell command installs dependencies, prepares the
+project database, and starts the complete app:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-Windows.ps1
+```
+
+Next time, double-click `Start-TumorXpert.cmd` or run `Start-TumorXpert.ps1`.
+
+## Processing progress
+
+Study pages and Jobs display measurements saved by the backend. Each pipeline
+stage has a bar, with subprocess bars for modality preprocessing, model loading,
+N4 iterations, synthesis/segmentation slices, Swin inference windows, previews,
+and exports. Leaving the page or refreshing reloads progress from PostgreSQL.
+Percentages summarize completed work, not estimated remaining time. Stages that
+are disabled, unnecessary, or unavailable in auto mode are explicitly marked
+as skipped. Older runs have no invented per-step measurements. A backend restart
+marks an interrupted run as failed; restart it from the study page. Run one API
+worker for this local processing workflow.
+
 ## Set up a fresh clone
 
 Trained model checkpoints are included through Git LFS. Install

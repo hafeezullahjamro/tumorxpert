@@ -18,6 +18,24 @@ async def lifespan(app: FastAPI):
     settings: Settings = get_settings()
     configure_logging()
     ensure_storage_tree(settings)
+    # This local app runs one API worker. A run from an earlier worker cannot
+    # still be executing after a fresh server startup.
+    from sqlalchemy import select
+    from .db.base import SessionLocal
+    from .db.models import Study
+    from .services.progress import timestamp
+    with SessionLocal() as db:
+        for study in db.scalars(select(Study).where(Study.status == "PROCESSING")):
+            study.status = "FAILED"
+            if study.progress:
+                snapshot = dict(study.progress)
+                snapshot.update(status="FAILED", error="Processing was interrupted by a backend restart. Retry this study.", finished_at=timestamp(), updated_at=timestamp())
+                for stage in snapshot.get("stages", []):
+                    for item in [stage, *stage.get("children", [])]:
+                        if item["status"] == "RUNNING":
+                            item["status"] = "FAILED"
+                study.progress = snapshot
+        db.commit()
 
     auto_delete_manager = AutoDeleteManager(settings)
     await auto_delete_manager.start()

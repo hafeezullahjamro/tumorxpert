@@ -57,6 +57,7 @@ class Study(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(StudyStatus, default="UPLOADED", nullable=False)
+    progress: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     sequences_present: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     qc_flags: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
